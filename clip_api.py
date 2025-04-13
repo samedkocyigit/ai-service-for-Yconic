@@ -1,10 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from rembg import remove
+from io import BytesIO
 from typing import List
 import clip
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import os
+import math
+import uuid
 
 app = FastAPI()
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -22,22 +26,64 @@ class Garderobe(BaseModel):
     top: List[ClotheItem] = []
     bottom: List[ClotheItem] = []
     shoes: List[ClotheItem] = []
-    outerwear: List[ClotheItem] = []
-    accessory: List[ClotheItem] = []
+    outwear: List[ClotheItem] = []
+    accessories: List[ClotheItem] = []
 
 class SuggestionRequest(BaseModel):
     userPersona: str
     garderobe: Garderobe
 
+def remove_background(img: Image.Image) -> Image.Image:
+    try:
+        with BytesIO() as buf:
+            img.save(buf, format="PNG")
+            result = remove(buf.getvalue())  # ✅ bytes veriyoruz
+            return Image.open(BytesIO(result)).convert("RGBA")
+    except Exception as e:
+        print(f"Background removal failed: {e}")
+        return img.convert("RGBA")
+
+
+def create_combination_image(image_paths: list[str], save_dir="/app/wwwroot/uploads/combinations") -> str:
+    grid_size = math.ceil(math.sqrt(len(image_paths)))
+    cell_size = 256
+    spacing = 10
+    background_color = (30, 25, 40)
+
+    canvas_width = (cell_size + spacing) * grid_size - spacing
+    canvas_height = (cell_size + spacing) * grid_size - spacing
+    canvas = Image.new("RGBA", (canvas_width, canvas_height), background_color)
+
+    for idx, img_path in enumerate(image_paths):
+        try:
+            img = Image.open(img_path).convert("RGBA")
+            img = remove_background(img) 
+            img = img.resize((cell_size, cell_size))
+            x = (idx % grid_size) * (cell_size + spacing)
+            y = (idx // grid_size) * (cell_size + spacing)
+            canvas.paste(img, (x, y), img)  
+        except Exception as e:
+            print(f"Failed to process {img_path}: {e}")
+            continue
+
+    file_name = f"comb_{uuid.uuid4().hex[:8]}.png"
+    full_path = os.path.join(save_dir, file_name)
+    os.makedirs(save_dir, exist_ok=True)
+    canvas.save(full_path)
+
+    return f"/uploads/combinations/{file_name}"
+
+
+# === Ana Endpoint: Kombin Önerisi ===
 @app.post("/analyze-garderobe")
 async def analyze_garderobe(payload: SuggestionRequest):
-    base_uploads = "/app/wwwroot/uploads"
+    base_uploads = "/app/wwwroot/uploads/clothe-photos"
     grouped_items = {
         "top": payload.garderobe.top,
         "bottom": payload.garderobe.bottom,
         "shoes": payload.garderobe.shoes,
-        "outerwear": payload.garderobe.outerwear,
-        "accessory": payload.garderobe.accessory
+        "outwear": payload.garderobe.outwear,
+        "accessories": payload.garderobe.accessories
     }
 
     suggested_combination = []
@@ -79,14 +125,13 @@ async def analyze_garderobe(payload: SuggestionRequest):
             "image_path": best_item.image_path
         })
 
-    # if payload.weather == "warm":
-    #     outerwear_ids = [item.clotheId for item in payload.garderobe.outerwear]
-    #     suggested_combination = [
-    #         item for item in suggested_combination if item["clotheId"] not in outerwear_ids
-    #     ]
+    # --- 🔥 Kolaj oluşturma adımı ---
+    image_paths = [os.path.join(base_uploads, os.path.basename(item["image_path"])) for item in suggested_combination]
+    main_image_url = create_combination_image(image_paths)
 
     return {
         "userPersona": payload.userPersona,
         "prompt": prompt,
-        "suggested_combination": suggested_combination
+        "suggested_combination": suggested_combination,
+        "mainImageUrl": main_image_url
     }
